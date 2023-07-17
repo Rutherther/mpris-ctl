@@ -1,10 +1,19 @@
-use std::{path::PathBuf, fs, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    error::Error,
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use clap::Parser;
-use mpris::{PlayerFinder, PlaybackStatus};
-use serde::{Serialize, Deserialize};
-use tokio::{net::{UnixListener, UnixStream}, time, task};
-use tokio_util::codec::{LengthDelimitedCodec, Framed};
+use mpris::{PlaybackStatus, PlayerFinder};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    time,
+};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use futures::{prelude::stream::StreamExt, SinkExt};
 
@@ -24,7 +33,7 @@ pub struct Cli {
     #[arg(short = 'c', long, default_value = r"config.json", value_hint = clap::ValueHint::FilePath)]
     pub config: PathBuf,
     #[arg(short = 's', long, default_value = r"/tmp/mpris-ctl.sock", value_hint = clap::ValueHint::FilePath)]
-    pub socket: PathBuf
+    pub socket: PathBuf,
 }
 
 type SharedData = Arc<Mutex<Vec<String>>>;
@@ -41,7 +50,7 @@ async fn main() {
 
     let last_active_mpris = last_active_players.clone();
     let _mpris_handle = tokio::spawn(async move {
-        handle_mpris_daemon(last_active_mpris).await;
+        handle_mpris_daemon_loop(last_active_mpris).await;
     });
 
     let listener = UnixListener::bind(&args.socket).expect("failed to bind socket");
@@ -52,7 +61,7 @@ async fn main() {
                 tokio::spawn(async move {
                     process(stream, last_active_listener).await;
                 });
-            },
+            }
             Err(e) => {
                 eprintln!("{:?}", e);
             }
@@ -60,29 +69,55 @@ async fn main() {
     }
 }
 
-async fn handle_mpris_daemon(shared_data: SharedData) {
-
+async fn handle_mpris_daemon_loop(shared_data: SharedData) {
     let mut interval = time::interval(Duration::from_millis(250));
     loop {
         interval.tick().await;
-        let player_finder = PlayerFinder::new().expect("Could not connect to D-Bus");
-        // get active players
-        let active_players: Vec<String> = player_finder
-            .iter_players()
-            .expect("Could not iterate players")
-            .map(|x| x.expect("Could not get one of the players"))
-            .filter(|x| x.get_playback_status().expect("Cannot get playback status") == PlaybackStatus::Playing)
-            .map(|x| String::from(x.identity()))
-            .collect();
-
-        if active_players.len() == 0 {
-            continue; // there is nothing to do
+        match handle_mpris_daemon(&shared_data).await {
+            Ok(..) => (),
+            Err(err) => eprintln!("Got an error in the daemon player finder loop: {}", err),
         }
+    }
+}
 
-        // change active players
-        let mut guard = shared_data.lock().expect("Could not lock the mutex");
+async fn handle_mpris_daemon(shared_data: &SharedData) -> Result<(), Box<dyn Error + '_>> {
+    let player_finder = PlayerFinder::new()?;
+
+    let mut errors = vec![];
+    let active_players: Vec<_> = player_finder
+        .iter_players()?
+        .filter_map(|x| {
+            let player_result = x.map_err(|e| errors.push(e)).ok();
+            let status = if let Some(player) = &player_result {
+                player
+                    .get_playback_status()
+                    .map_err(|e| errors.push(e))
+                    .ok()
+            } else {
+                Option::None
+            };
+
+            if status.is_some() && status.unwrap() == PlaybackStatus::Playing {
+                player_result
+            } else {
+                Option::None
+            }
+        })
+        .map(|x| String::from(x.identity()))
+        .collect();
+
+    if active_players.len() != 0 {
+        let mut guard = shared_data.lock()?;
         *guard = active_players;
     }
+
+    for error in errors {
+        // TODO: return the errors correctly (this is not so easy as the DBusError does not contain copy trait)
+        // maybe create a custom error type somehow wrapping dbus error?
+        eprintln!("An errorw hen obtaining a player has occurred: {}", error);
+    }
+
+    Ok(())
 }
 
 async fn process(stream: UnixStream, shared_data: SharedData) {
@@ -105,15 +140,13 @@ async fn process(stream: UnixStream, shared_data: SharedData) {
                     eprintln!("Could not send to the client: {:?}", send.err());
                     break;
                 }
-            },
+            }
             Err(err) => {
                 eprintln!("Could not read from client: {:?}", err);
                 break;
             }
         }
     }
-
-    task::yield_now().await;
 }
 
 async fn handle_request(request: Request, shared_data: SharedData) -> Response {
@@ -121,7 +154,7 @@ async fn handle_request(request: Request, shared_data: SharedData) -> Response {
         Request::GetLastActive => {
             let guard = shared_data.lock().expect("Could not lock the mutex.");
             Response::Players(guard.clone())
-        },
-        _ => Response::None
+        }
+        _ => Response::None,
     }
 }
