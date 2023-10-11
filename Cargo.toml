@@ -1,5 +1,6 @@
 [package]
 name = "mpris-ctl"
+description = "Cli control of mpris players, supporting controlling recent player with a daemon"
 version = "0.1.0"
 edition = "2021"
 
