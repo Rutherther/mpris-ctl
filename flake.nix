@@ -3,19 +3,15 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    naersk = {
-      url = "github:nmattia/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, naersk, nixpkgs }: let
+  outputs = { self, nixpkgs }: let
     cargoToml = (builtins.fromTOML (builtins.readFile ./Cargo.toml));
     supportedSystems = ["x86_64-linux"];
     forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: f system);
   in {
     overlay = final: prev: {
-      "${cargoToml.package.name}" = final.callPackage ./. { inherit naersk; };
+      "${cargoToml.package.name}" = final.callPackage ./. {};
     };
 
     packages = forAllSystems (system:
